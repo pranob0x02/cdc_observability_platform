@@ -1,6 +1,6 @@
 # Cloud-Native Real-Time CDC & SRE Observability Platform
 
-A production-style, local-first Infrastructure-as-Code (IaC) platform built with **Terraform** and **Terragrunt** on Kubernetes (`kind`). It implements a **Zero-Hardcoded-Secrets Change Data Capture (CDC)** pipeline that streams transactional database mutations from **PostgreSQL 16** through **Debezium Server** into **Redpanda**, backed by full-stack **SRE Observability** (**Prometheus**, **Grafana**, **Loki**, **Promtail**, **OpenTelemetry**) and **multi-window SLO error-budget burn-rate alerting**.
+A production-style, local-first Infrastructure-as-Code (IaC) platform built with **Terraform** and **Terragrunt** on Kubernetes (`kind`). It implements a **Zero-Hardcoded-Secrets Change Data Capture (CDC)** pipeline streaming transactional database mutations from **PostgreSQL 16** through **Debezium Server** into **Redpanda**, backed by full-stack **SRE Observability** (**Prometheus**, **Grafana**, **Loki**, **Promtail**, **OpenTelemetry**) and **SLO error-budget burn-rate alerting**.
 
 ---
 
@@ -43,28 +43,54 @@ flowchart TB
 
 ---
 
-## Tech Stack & How Every Tool Works Together
+## Deep Dive: Tools Used & How They Work Together
 
-### 1. Infrastructure & Orchestration Layer (`01-cluster`)
-* **Docker & `kind` (Kubernetes in Docker):** Provisions a multi-node local Kubernetes cluster (`1 control-plane` + `1 worker`) with `extraPortMappings` (`8200`, `8080`, `8081`, `3000`) routed directly to NodePorts on the worker node so all UIs are reachable on `localhost` without manual `kubectl port-forward`.
-* **Terraform & Terragrunt:** Organizes infrastructure into four decoupled, reusable Terraform modules (`modules/`) orchestrated by Terragrunt (`live/local-kind/`). Terragrunt automatically resolves cross-layer `dependency` outputs (`kubeconfig_path`, `cluster_secret_store_name`, `streaming_namespace`) in a strict Directed Acyclic Graph (DAG).
+### 1. Cluster & Infrastructure-as-Code Layer (`01-cluster`)
+* **Docker & `kind` (Kubernetes in Docker):**
+  * **Role:** Runs a multi-node Kubernetes cluster (`1 control-plane` + `1 worker` container) locally on Docker.
+  * **Integration:** Configures `extraPortMappings` on the worker node so host ports (`8200`, `8080`, `8081`, `3000`) forward directly to Kubernetes `NodePort` services (`30820`, `30080`, `30081`, `30300`), eliminating manual `kubectl port-forward` commands.
+* **Terraform & Terragrunt:**
+  * **Role:** Terraform defines reusable infrastructure modules (`modules/*`), while Terragrunt orchestrates four layered environments (`live/local-kind/01-cluster` -> `04-observability`).
+  * **Integration:** Each downstream `terragrunt.hcl` declares `dependency` blocks to read outputs from upstream layers (e.g., `03-streaming` consumes `kubeconfig_path` from `01-cluster` and `cluster_secret_store_name` from `02-security`).
 
-### 2. Zero-Hardcoded-Secrets Security Layer (`02-security`)
-* **HashiCorp Vault (KV-v2):** Acts as the single source of truth for all platform secrets. Terraform generates random 24-character passwords (`hashicorp/random`) at deploy time and writes them into Vault (`secret/trading/postgres`, `secret/observability/grafana`, and `secret/platform/headlamp`)—zero plaintext credentials exist in Git or `.tf` files.
-* **External Secrets Operator (ESO):** Authenticates against Vault using Vault's **Kubernetes Auth Backend** (verifying Kubernetes ServiceAccount JWTs against the cluster's `kube-root-ca.crt`). ESO continuously reconciles `ExternalSecret` resources into native Kubernetes `Secrets` (`postgres-credentials` and `grafana-admin`) across namespaces.
+### 2. Secrets Management & Zero-Trust Layer (`02-security`)
+* **HashiCorp Vault (KV-v2 Secret Engine):**
+  * **Role:** Centralizes and encrypts all credentials (`secret/trading/postgres`, `secret/observability/grafana`, and `secret/platform/headlamp`).
+  * **Integration:** During deployment, Terraform's `hashicorp/random` provider generates 24-character passwords and writes them directly into Vault—ensuring zero plaintext passwords exist in Git, `.tf` files, or environment variables.
+* **External Secrets Operator (ESO):**
+  * **Role:** Bridges HashiCorp Vault and native Kubernetes `Secrets`.
+  * **Integration:** ESO authenticates to Vault via Vault's **Kubernetes Auth Backend** (`auth/kubernetes/role/external-secrets`) using its Kubernetes ServiceAccount JWT verified against `kube-root-ca.crt`. Through `ClusterSecretStore` (`vault-backend`), ESO reconciles `ExternalSecret` manifests in `streaming` and `observability` into native Kubernetes `Secrets` (`postgres-credentials` and `grafana-admin`).
 
 ### 3. Real-Time CDC Streaming & Load Layer (`03-streaming`)
-* **PostgreSQL 16 (`wal_level=logical`):** Runs an `orders` table configured with `REPLICA IDENTITY FULL` so both before-and-after row images are written to the Write-Ahead Log (WAL) on every mutation.
-* **`pgbench` Stress Generator:** Runs a custom transactional SQL workload (`orders_workload.sql`) that executes paired `INSERT` (`status='NEW'`) and `UPDATE` (`status='FILLED'`) statements against `public.orders` at a configurable TPS rate.
-* **Debezium Server 2.7 (Apache 2.0):** Connects to PostgreSQL via the native `pgoutput` logical decoding plugin using a dedicated replication slot (`debezium_orders_cdc`), converts WAL row changes into structured JSON CDC events (`"op":"c"` for inserts, `"op":"u"` for updates), and stores connector offsets in Redpanda (`debezium.offsets`).
-* **Redpanda & Redpanda Console:** A Kafka-API-compatible streaming engine (`redpanda.streaming.svc.cluster.local:9093`) hosting the partitioned `cdc.public.orders` topic, paired with **Redpanda Console** on port `8080` for real-time topic, partition, consumer-group, and JSON payload inspection.
+* **PostgreSQL 16 (`wal_level=logical`):**
+  * **Role:** Serves as the transactional OLTP source database (`trading`) storing `public.orders`.
+  * **Integration:** Configured with `wal_level=logical` and `ALTER TABLE public.orders REPLICA IDENTITY FULL` so every `INSERT`, `UPDATE`, and `DELETE` writes complete before-and-after row data into the Write-Ahead Log (WAL).
+* **`pgbench` Workload Generator:**
+  * **Role:** Simulates live trading order flow against PostgreSQL.
+  * **Integration:** Runs as a Kubernetes `Job` executing `orders_workload.sql`, performing paired `INSERT` (`status='NEW'`) and `UPDATE` (`status='FILLED'`) transactions at a configurable TPS (`10 TPS` = `20 CDC events/sec` by default).
+* **Debezium Server 2.7 (Apache 2.0):**
+  * **Role:** Performs log-based Change Data Capture without polling or adding query load to PostgreSQL.
+  * **Integration:** Connects to `postgres.streaming.svc.cluster.local:5432` via PostgreSQL's native `pgoutput` logical decoding plugin using a persistent replication slot (`debezium_orders_cdc`). Serializes WAL row changes into JSON events, publishes them to Redpanda (`cdc.public.orders`), and checkpoints its Log Sequence Number (LSN) into Redpanda's `debezium.offsets` topic.
+* **Redpanda & Redpanda Console:**
+  * **Role:** Redpanda is a C++ Kafka-API-compatible streaming broker (no ZooKeeper or JVM required), paired with Redpanda Console for visual stream inspection.
+  * **Integration:** Receives CDC events on internal DNS (`redpanda.streaming.svc.cluster.local:9093`), exposes topic throughput metrics on `:9644/public_metrics` for Prometheus, and serves the web console on `localhost:8080`.
 
-### 4. SRE Observability, Dashboards & UI Layer (`04-observability`)
-* **Prometheus & Alertmanager (`kube-prometheus-stack`):** Scrapes Redpanda's `/public_metrics` endpoint every `5s` via a custom `ServiceMonitor` (`redpanda-cdc-monitor`) alongside Kubernetes `kube-state-metrics` and `cAdvisor` container metrics. Evaluates `PrometheusRule` alerts (`CDCConnectorDown` and `CDCPipelineHighErrorBudgetBurn`) for fast SLO error-budget burn.
-* **Grafana:** Boots with its admin password synced from Vault via ESO and automatically loads a custom **CDC Pipeline & SRE Observability** dashboard (`ConfigMap` with `grafana_dashboard: "1"`). Visualizes live Debezium replica health, real-time `cdc.public.orders` throughput (`events/sec`), cumulative delivered events, committed offsets, pod memory working sets, and live container logs.
-* **Loki & Promtail:** Promtail runs as a DaemonSet tailing containerd CRI logs across every node and ships structured log streams into Loki, which Grafana queries natively alongside Prometheus metrics.
-* **OpenTelemetry Collector:** Deployed with `otlp` gRPC (`:4317`) and HTTP (`:4318`) receivers and a Prometheus metrics exporter (`:8889`) ready for distributed trace and custom application telemetry ingestion.
-* **Headlamp Kubernetes Web UI:** Provides a modern cluster dashboard on port `8081` authenticated via a persistent `cluster-admin` ServiceAccount token stored in Vault (`secret/platform/headlamp`).
+### 4. SRE Observability, Alerting & Cluster UI Layer (`04-observability`)
+* **Prometheus & Alertmanager (`kube-prometheus-stack`):**
+  * **Role:** Collects time-series metrics across the cluster and evaluates SLO alerting rules.
+  * **Integration:** A custom `ServiceMonitor` (`redpanda-cdc-monitor`) scrapes Redpanda's `/public_metrics` every `5s` alongside `kube-state-metrics` and `cAdvisor`. A `PrometheusRule` (`cdc-pipeline-slo-alerts`) evaluates `CDCConnectorDown` and `CDCPipelineHighErrorBudgetBurn`.
+* **Grafana:**
+  * **Role:** Provides unified visualization across metrics, logs, and alerts.
+  * **Integration:** Logs in using the `grafana-admin` Secret synced from Vault, connects to Prometheus and Loki datasources, and auto-loads a Terraform-provisioned dashboard (`ConfigMap` labeled `grafana_dashboard: "1"`).
+* **Loki & Promtail:**
+  * **Role:** Provides centralized log aggregation without heavy indexing overhead.
+  * **Integration:** Promtail runs as a `DaemonSet` across every `kind` node, parses containerd CRI logs, attaches Kubernetes labels, and ships log streams to `loki.observability.svc.cluster.local:3100`.
+* **OpenTelemetry Collector:**
+  * **Role:** Acts as a vendor-neutral telemetry ingestion pipeline.
+  * **Integration:** Exposes OTLP gRPC (`:4317`) and HTTP (`:4318`) receivers and exports metrics to Prometheus (`:8889`) for downstream trace and metric ingestion.
+* **Headlamp Kubernetes Web UI:**
+  * **Role:** Offers a real-time graphical dashboard for inspecting Kubernetes nodes, pods, deployments, and events.
+  * **Integration:** Runs on `localhost:8081` and authenticates via a `cluster-admin` ServiceAccount (`headlamp-platform-admin`) whose persistent token is stored in HashiCorp Vault (`secret/platform/headlamp`).
 
 ---
 
