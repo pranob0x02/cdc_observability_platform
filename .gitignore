@@ -1,0 +1,16 @@
+# Terraform & Terragrunt caches and state (contains sensitive generated secrets)
+**/.terraform/
+**/.terragrunt-cache/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+generated_providers.tf
+backend.tf
+
+# Generated local cluster kubeconfig
+live/**/kubeconfig
+
+# OS & editor artifacts
+.DS_Store
+.vscode/
+.idea/
