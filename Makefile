@@ -30,6 +30,10 @@ creds:
 	@printf "Grafana Password    : "
 	@kubectl --kubeconfig=$(KUBECONFIG) -n observability get secret grafana-admin -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 -d || echo "(syncing...)"
 	@echo ""
+	@echo "MinIO Console UI    : http://localhost:9001  (User: lakehouse-admin)"
+	@printf "MinIO Password      : "
+	@kubectl --kubeconfig=$(KUBECONFIG) -n lakehouse get secret minio-credentials -o jsonpath='{.data.MINIO_ROOT_PASSWORD}' 2>/dev/null | base64 -d || echo "(syncing...)"
+	@echo ""
 	@echo "============================================================="
 
 headlamp-token:

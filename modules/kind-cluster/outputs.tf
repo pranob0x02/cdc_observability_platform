@@ -1,8 +1,14 @@
+resource "local_file" "kubeconfig" {
+  content         = kind_cluster.default.kubeconfig
+  filename        = abspath("${path.module}/../../live/local-kind/01-cluster/kubeconfig")
+  file_permission = "0600"
+}
+
 output "kubeconfig_path" {
-  value       = kind_cluster.this.kubeconfig_path
-  description = "Absolute path to the kind cluster kubeconfig"
+  description = "Path to the generated kubeconfig for the local kind cluster"
+  value       = local_file.kubeconfig.filename
 }
 
 output "cluster_name" {
-  value = kind_cluster.this.name
+  value = kind_cluster.default.name
 }

@@ -2,17 +2,16 @@ terraform {
   required_providers {
     kind = {
       source  = "tehcyx/kind"
-      version = "~> 0.6.0"
+      version = "~> 0.6"
     }
   }
 }
 
-provider "kind" {}
-
-resource "kind_cluster" "this" {
+resource "kind_cluster" "default" {
   name            = var.cluster_name
+  node_image      = var.node_image
   wait_for_ready  = true
-  kubeconfig_path = var.kubeconfig_path
+  kubeconfig_path = abspath("${path.cwd}/kubeconfig")
 
   kind_config {
     kind        = "Cluster"
@@ -20,31 +19,41 @@ resource "kind_cluster" "this" {
 
     node {
       role = "control-plane"
-
-      extra_port_mappings {
-        container_port = 30820 # HashiCorp Vault UI
-        host_port      = 8200
-        protocol       = "TCP"
-      }
-      extra_port_mappings {
-        container_port = 30080 # Redpanda Console UI
-        host_port      = 8080
-        protocol       = "TCP"
-      }
-      extra_port_mappings {
-        container_port = 30081 # Headlamp K8s UI
-        host_port      = 8081
-        protocol       = "TCP"
-      }
-      extra_port_mappings {
-        container_port = 30300 # Grafana UI
-        host_port      = 3000
-        protocol       = "TCP"
-      }
     }
 
     node {
       role = "worker"
+
+      extra_port_mappings {
+        container_port = 30820
+        host_port      = 8200
+        protocol       = "TCP"
+      }
+      extra_port_mappings {
+        container_port = 30080
+        host_port      = 8080
+        protocol       = "TCP"
+      }
+      extra_port_mappings {
+        container_port = 30081
+        host_port      = 8081
+        protocol       = "TCP"
+      }
+      extra_port_mappings {
+        container_port = 30300
+        host_port      = 3000
+        protocol       = "TCP"
+      }
+      extra_port_mappings {
+        container_port = 30900
+        host_port      = 9000
+        protocol       = "TCP"
+      }
+      extra_port_mappings {
+        container_port = 30901
+        host_port      = 9001
+        protocol       = "TCP"
+      }
     }
   }
 }
